@@ -105,15 +105,17 @@ class Trainer:
         self.start_time = time.time()
         self.last_log_time = self.start_time
         self.last_log_tokens = 0
+        self.elapsed_wall_time = 0.0
 
         Path(config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         self._init_log_file(append=bool(config.resume_from))
 
         if config.resume_from:
             self.load_checkpoint(config.resume_from)
+            resume_now = time.time()
             self.last_log_tokens = self.tokens_seen
-            self.last_log_time = time.time()
-            self.start_time = self.last_log_time
+            self.last_log_time = resume_now
+            self.start_time = resume_now
             print(f"Resumed training from: {config.resume_from}")
 
     def _init_log_file(self, append: bool = False):
@@ -228,6 +230,7 @@ class Trainer:
             'optimizer_state': self.optimizer.state_dict(),
             'muon_state': self.muon.state_dict() if self.muon else None,
             'scaler_state': self.scaler.state_dict() if self.scaler.is_enabled() else None,
+            'elapsed_wall_time': self.elapsed_wall_time + (time.time() - self.start_time),
         }, path)
         print(f"Saved checkpoint: {path}")
 
@@ -243,6 +246,7 @@ class Trainer:
             self.scaler.load_state_dict(scaler_state)
         self.step = int(checkpoint.get('step', 0))
         self.tokens_seen = int(checkpoint.get('tokens_seen', 0))
+        self.elapsed_wall_time = float(checkpoint.get('elapsed_wall_time', 0.0))
 
     def get_log_dict(self) -> Dict[str, Any]:
         return {
@@ -265,7 +269,7 @@ class Trainer:
                 elapsed = max(now - self.last_log_time, 1e-8)
                 delta_tokens = self.tokens_seen - self.last_log_tokens
                 tokens_per_sec = delta_tokens / elapsed
-                wall_time = now - self.start_time
+                wall_time = self.elapsed_wall_time + (now - self.start_time)
                 print(
                     f"step={self.step} | loss={loss:.4f} | "
                     f"tokens={self.tokens_seen:,} | "
@@ -284,4 +288,6 @@ class Trainer:
             checkpoint_interval = self.config.batch_size * self.config.gradient_accumulation * 512
             if self.tokens_seen % self.config.checkpoint_every_tokens < checkpoint_interval:
                 self.save_checkpoint(f"tokens_{self.tokens_seen // 1_000_000}M")
-        self.save_checkpoint("last")
+        self.save_checkpoint(
+            f"completed_step_{self.step}_tokens_{self.tokens_seen // 1_000_000}M"
+        )
