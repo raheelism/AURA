@@ -1,0 +1,47 @@
+model:
+  d_surface: 512
+  d_reasoning: 256
+  d_verify: 64
+  n_reasoning_slots: 32
+  n_blocks: 6
+  n_heads_surface: 8
+  n_kv_heads_surface: 2
+  n_heads_reasoning: 4
+  d_ffn_pattern: 512
+  d_ffn_semantic: 2048
+  d_ffn_reasoning: 512
+  local_window: 64
+  bridge_top_k: 8
+  cope_positions: 16
+  vocab_size: 8192
+  max_seq_len: 512
+
+training:
+  batch_size: 16
+  gradient_accumulation: 8
+  max_lr: 1.0e-3
+  min_lr: 1.0e-4
+  warmup_tokens: 100000000
+  stable_tokens: 1300000000
+  decay_tokens: 100000000
+  grad_clip: 1.0
+  weight_decay: 0.1
+  dtype: float16
+  surprise_loss_weight: 0.1
+  difficulty_entropy_weight: 0.01
+
+optimizer:
+  name: muon
+  momentum: 0.95
+  nesterov: true
+  embed_lr: 3.0e-4
+  verify_lr: 1.0e-3
+
+init:
+  difficulty_bias: -1.0
+  reasoning_slot_std: 0.02
+
+hardware:
+  gpus: 2
+  strategy: ddp
+  gradient_checkpointing: true

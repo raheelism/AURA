@@ -1,0 +1,25 @@
+model:
+  n_layers: 8
+  d_model: 512
+  n_heads: 8
+  n_kv_heads: 2
+  d_ffn: 1408
+  vocab_size: 8192
+  max_seq_len: 512
+  rope_theta: 10000.0
+
+training:
+  batch_size: 32
+  gradient_accumulation: 4
+  max_lr: 3.0e-4
+  min_lr: 3.0e-5
+  warmup_tokens: 100000000
+  stable_tokens: 1300000000
+  decay_tokens: 100000000
+  grad_clip: 1.0
+  weight_decay: 0.1
+  dtype: float16
+
+optimizer:
+  name: adamw
+  betas: [0.9, 0.95]
