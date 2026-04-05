@@ -88,6 +88,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         dtype=cfg["training"]["dtype"],
         surprise_loss_weight=cfg["training"]["surprise_loss_weight"],
         difficulty_entropy_weight=cfg["training"]["difficulty_entropy_weight"],
+        resume_from=args.resume_from,
     )
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -211,6 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--checkpoint-every-tokens", type=int, default=100_000_000)
     train.add_argument("--log-interval", type=int, default=100)
     train.add_argument("--val-interval", type=int, default=2000)
+    train.add_argument("--resume-from", default=None)
     train.set_defaults(func=cmd_train)
 
     ablations = sub.add_parser("ablations", help="Run selected ablations")

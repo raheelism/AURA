@@ -1,3 +1,4 @@
+import csv
 import torch
 import tempfile
 import os
@@ -87,3 +88,62 @@ def test_trainer_log_dict_has_required_keys(tmp_path):
     required = ['step', 'train_loss', 'lr', 'tokens_seen', 'grad_norm']
     for key in required:
         assert key in log, f"Missing key: {key}"
+
+
+def test_trainer_resume_from_checkpoint(tmp_path):
+    model = make_tiny_aurora()
+    dataset = make_tiny_dataset(tmp_path)
+    ckpt_dir = str(tmp_path / "ckpts")
+
+    cfg1 = TrainerConfig(
+        batch_size=2, gradient_accumulation=1,
+        max_lr=1e-3, min_lr=1e-4,
+        warmup_tokens=100, stable_tokens=800, decay_tokens=100,
+        grad_clip=1.0, weight_decay=0.1,
+        checkpoint_dir=ckpt_dir,
+        log_interval=1, val_interval=10, max_tokens=64,
+        device='cpu', dtype='float32',
+    )
+    trainer1 = Trainer(model, dataset, dataset, cfg1)
+    trainer1.train_one_step()
+    trainer1.save_checkpoint("resume_test")
+    ckpt_path = str(Path(ckpt_dir) / "ckpt_resume_test.pt")
+
+    model2 = make_tiny_aurora()
+    cfg2 = TrainerConfig(
+        batch_size=2, gradient_accumulation=1,
+        max_lr=1e-3, min_lr=1e-4,
+        warmup_tokens=100, stable_tokens=800, decay_tokens=100,
+        grad_clip=1.0, weight_decay=0.1,
+        checkpoint_dir=ckpt_dir,
+        log_interval=1, val_interval=10, max_tokens=64,
+        device='cpu', dtype='float32',
+        resume_from=ckpt_path,
+    )
+    trainer2 = Trainer(model2, dataset, dataset, cfg2)
+    assert trainer2.step == trainer1.step
+    assert trainer2.tokens_seen == trainer1.tokens_seen
+
+
+def test_trainer_writes_progress_csv_rows(tmp_path):
+    model = make_tiny_aurora()
+    dataset = make_tiny_dataset(tmp_path)
+    ckpt_dir = str(tmp_path / "ckpts")
+    config = TrainerConfig(
+        batch_size=2, gradient_accumulation=1,
+        max_lr=1e-3, min_lr=1e-4,
+        warmup_tokens=100, stable_tokens=800, decay_tokens=100,
+        grad_clip=1.0, weight_decay=0.1,
+        checkpoint_dir=ckpt_dir,
+        log_interval=1, val_interval=1000, max_tokens=64,
+        device='cpu', dtype='float32',
+    )
+    trainer = Trainer(model, dataset, dataset, config)
+    trainer.train()
+
+    log_path = Path(ckpt_dir) / "train_log.csv"
+    assert log_path.exists()
+    with open(log_path, newline='') as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) > 0
+    assert rows[0]["tokens_per_sec"] != ""

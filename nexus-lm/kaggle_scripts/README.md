@@ -28,6 +28,21 @@ This folder provides `.py` entrypoints so you can run the workflow from a **sing
   --max-tokens 1500000000
 ```
 
+Training progress is printed with step/loss/lr/tokens-per-sec/wall-time, and CSV logs are written to:
+
+`/kaggle/working/checkpoints/train_log.csv`
+
+Resume training from a saved checkpoint:
+
+```bash
+!python /kaggle/working/nexus-lm/kaggle_scripts/run.py train \
+  --train-bin /kaggle/input/nexus-data/fineweb_edu_train.bin \
+  --val-bin /kaggle/input/nexus-data/fineweb_edu_val.bin \
+  --checkpoint-dir /kaggle/working/checkpoints \
+  --resume-from /kaggle/working/checkpoints/ckpt_tokens_500M.pt \
+  --max-tokens 1500000000
+```
+
 ## 4) Ablation run
 
 ```bash
