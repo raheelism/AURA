@@ -31,6 +31,7 @@ class TrainerConfig:
     dtype: str = "float16"
     surprise_loss_weight: float = 0.1
     difficulty_entropy_weight: float = 0.01
+    resume_from: Optional[str] = None
 
 
 class Trainer:
@@ -100,17 +101,53 @@ class Trainer:
         self.tokens_seen = 0
         self.last_train_loss = 0.0
         self.last_grad_norm = 0.0
+        self.last_val_loss: Optional[float] = None
+        self.start_time = time.time()
+        self.last_log_time = self.start_time
+        self.last_log_tokens = 0
+        self.elapsed_wall_time = 0.0
 
         Path(config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
-        self._init_log_file()
+        self._init_log_file(append=bool(config.resume_from))
 
-    def _init_log_file(self):
+        if config.resume_from:
+            self.load_checkpoint(config.resume_from)
+            resume_now = time.time()
+            self.last_log_tokens = self.tokens_seen
+            self.last_log_time = resume_now
+            self.start_time = resume_now
+            print(f"Resumed training from: {config.resume_from}")
+
+    def _init_log_file(self, append: bool = False):
         self.log_path = os.path.join(self.config.checkpoint_dir, "train_log.csv")
-        with open(self.log_path, 'w', newline='') as f:
+        write_header = not (append and os.path.exists(self.log_path))
+        mode = 'a' if append else 'w'
+        with open(self.log_path, mode, newline='') as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow([
+                    'step', 'tokens_seen', 'train_loss', 'val_loss', 'lr',
+                    'grad_norm', 'tokens_per_sec', 'wall_time'
+                ])
+
+    def _append_log_row(
+        self,
+        train_loss: float,
+        val_loss: Optional[float],
+        tokens_per_sec: float,
+        wall_time: float,
+    ) -> None:
+        with open(self.log_path, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
-                'step', 'tokens_seen', 'train_loss', 'val_loss', 'lr',
-                'grad_norm', 'tokens_per_sec', 'wall_time'
+                self.step,
+                self.tokens_seen,
+                train_loss,
+                val_loss if val_loss is not None else "",
+                self.scheduler.get_lr(self.tokens_seen),
+                self.last_grad_norm,
+                tokens_per_sec,
+                wall_time,
             ])
 
     def _get_batch(self):
@@ -191,7 +228,25 @@ class Trainer:
             'tokens_seen': self.tokens_seen,
             'model_state': self.model.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
+            'muon_state': self.muon.state_dict() if self.muon else None,
+            'scaler_state': self.scaler.state_dict() if self.scaler.is_enabled() else None,
+            'elapsed_wall_time': self.elapsed_wall_time + (time.time() - self.start_time),
         }, path)
+        print(f"Saved checkpoint: {path}")
+
+    def load_checkpoint(self, path: str):
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state'])
+        if 'optimizer_state' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        if self.muon and checkpoint.get('muon_state') is not None:
+            self.muon.load_state_dict(checkpoint['muon_state'])
+        scaler_state = checkpoint.get('scaler_state')
+        if scaler_state is not None and self.scaler.is_enabled():
+            self.scaler.load_state_dict(scaler_state)
+        self.step = int(checkpoint.get('step', 0))
+        self.tokens_seen = int(checkpoint.get('tokens_seen', 0))
+        self.elapsed_wall_time = float(checkpoint.get('elapsed_wall_time', 0.0))
 
     def get_log_dict(self) -> Dict[str, Any]:
         return {
@@ -207,16 +262,32 @@ class Trainer:
         print(f"Training for {self.config.max_tokens:,} tokens")
         while self.tokens_seen < self.config.max_tokens:
             loss = self.train_one_step()
+            val_loss: Optional[float] = None
 
             if self.step % self.config.log_interval == 0:
-                print(f"step={self.step} | loss={loss:.4f} | "
-                      f"tokens={self.tokens_seen:,} | "
-                      f"lr={self.scheduler.get_lr(self.tokens_seen):.2e}")
+                now = time.time()
+                elapsed = max(now - self.last_log_time, 1e-8)
+                delta_tokens = self.tokens_seen - self.last_log_tokens
+                tokens_per_sec = delta_tokens / elapsed
+                wall_time = self.elapsed_wall_time + (now - self.start_time)
+                print(
+                    f"step={self.step} | loss={loss:.4f} | "
+                    f"tokens={self.tokens_seen:,} | "
+                    f"lr={self.scheduler.get_lr(self.tokens_seen):.2e} | "
+                    f"tok/s={tokens_per_sec:,.0f} | wall={wall_time:.1f}s"
+                )
+                self._append_log_row(loss, self.last_val_loss, tokens_per_sec, wall_time)
+                self.last_log_tokens = self.tokens_seen
+                self.last_log_time = now
 
             if self.step % self.config.val_interval == 0:
                 val_loss = self.evaluate()
+                self.last_val_loss = val_loss
                 print(f"  val_loss={val_loss:.4f}")
 
             checkpoint_interval = self.config.batch_size * self.config.gradient_accumulation * 512
             if self.tokens_seen % self.config.checkpoint_every_tokens < checkpoint_interval:
                 self.save_checkpoint(f"tokens_{self.tokens_seen // 1_000_000}M")
+        self.save_checkpoint(
+            f"completed_step_{self.step}_tokens_{self.tokens_seen // 1_000_000}M"
+        )
