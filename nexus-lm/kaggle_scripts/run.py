@@ -121,6 +121,10 @@ def cmd_ablations(args: argparse.Namespace) -> None:
             )
         )
 
+    if not results:
+        print("No ablation results to save.")
+        return
+
     output_csv = output_dir / "ablation_results.csv"
     with open(output_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
@@ -170,7 +174,9 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
                 temperature=args.temperature,
                 top_k=args.top_k,
             )
-        generated_text = decode(sp, generated[0].tolist()[len(ids[0]):])
+        prompt_len = len(ids[0])
+        generated_ids = generated[0].tolist()[prompt_len:]
+        generated_text = decode(sp, generated_ids)
         print(f"Prompt: {args.prompt}")
         print(f"Generated: {generated_text}")
 
