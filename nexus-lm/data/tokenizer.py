@@ -4,9 +4,8 @@ from typing import List
 
 def train_tokenizer(texts: List[str], vocab_size: int, output_path: str) -> None:
     """Train a BPE SentencePiece tokenizer on the given texts."""
-    combined = "\n".join(texts)
     spm.SentencePieceTrainer.train(
-        sentence_iterator=iter(combined.split("\n")),
+        sentence_iterator=iter(texts),
         model_prefix=output_path.replace(".model", ""),
         vocab_size=vocab_size,
         model_type="bpe",
@@ -20,7 +19,9 @@ def train_tokenizer(texts: List[str], vocab_size: int, output_path: str) -> None
         eos_piece="<eos>",
         character_coverage=0.9995,
         num_threads=4,
-        hard_vocab_limit=False,  # allow smaller vocab when data is insufficient
+        input_sentence_size=1_000_000,   # cap sentences loaded into RAM
+        shuffle_input_sentence=True,
+        hard_vocab_limit=False,
     )
 
 

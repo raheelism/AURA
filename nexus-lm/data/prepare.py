@@ -41,18 +41,24 @@ def stream_texts(dataset_name: str):
 
 
 def train_tokenizer_on_dataset(
-    dataset_name: str, output_path: str, vocab_size: int = 8192, n_texts: int = 100_000
+    dataset_name: str, output_path: str, vocab_size: int = 8192, n_texts: int = 200_000
 ):
-    """Train BPE tokenizer on a sample of the dataset."""
+    """
+    Train BPE tokenizer by streaming texts directly — no list accumulation.
+    Uses a generator so RAM stays ~constant regardless of n_texts.
+    """
     from data.tokenizer import train_tokenizer
-    print(f"Collecting {n_texts:,} texts for tokenizer training...")
-    texts = []
-    for text in stream_texts(dataset_name):
-        texts.append(text)
-        if len(texts) >= n_texts:
-            break
-    print(f"Training tokenizer (vocab_size={vocab_size}) on {len(texts):,} texts...")
-    train_tokenizer(texts, vocab_size=vocab_size, output_path=output_path)
+
+    def text_generator():
+        count = 0
+        for text in stream_texts(dataset_name):
+            yield text
+            count += 1
+            if count >= n_texts:
+                break
+
+    print(f"Training tokenizer (vocab_size={vocab_size}) on up to {n_texts:,} streamed texts...")
+    train_tokenizer(list(text_generator()), vocab_size=vocab_size, output_path=output_path)
     print(f"Tokenizer saved to {output_path}")
 
 
@@ -62,8 +68,15 @@ def prepare_dataset(
     tokenizer_path: str,
     n_tokens_approx: int,
     val_fraction: float = 0.01,
+    chunk_size: int = 100_000,
 ):
-    """Tokenize and write dataset to binary memmap files."""
+    """
+    Tokenize and write dataset to binary memmap files.
+
+    Streams text → tokenizes → writes directly to pre-allocated memmap in chunks.
+    Never holds more than `chunk_size` tokens in RAM at once, so memory usage
+    stays constant regardless of dataset size.
+    """
     from data.tokenizer import load_tokenizer, encode
     sp = load_tokenizer(tokenizer_path)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -74,32 +87,80 @@ def prepare_dataset(
     val_budget = int(n_tokens_approx * val_fraction)
     train_budget = n_tokens_approx - val_budget
 
-    train_tokens = []
-    val_tokens = []
+    # Pre-allocate memmap files at full size (2 bytes per token via uint16)
+    print(f"Pre-allocating {train_budget:,} token train file ({train_budget*2/1e9:.2f} GB)...")
+    train_fp = np.memmap(train_path, dtype=np.uint16, mode='w+', shape=(train_budget,))
+
+    print(f"Pre-allocating {val_budget:,} token val file ({val_budget*2/1e9:.2f} GB)...")
+    val_fp = np.memmap(val_path, dtype=np.uint16, mode='w+', shape=(val_budget,))
+
+    train_cursor = 0
+    val_cursor = 0
+    chunk: list = []
+
+    def flush_chunk(buf: list, fp: np.memmap, cursor: int, budget: int):
+        """Write buf to fp starting at cursor, respecting budget. Returns new cursor."""
+        if not buf:
+            return cursor
+        arr = np.array(buf, dtype=np.uint16)
+        space = budget - cursor
+        write_n = min(len(arr), space)
+        fp[cursor:cursor + write_n] = arr[:write_n]
+        return cursor + write_n
 
     print(f"Tokenizing {dataset_name} (target: {n_tokens_approx:,} tokens)...")
-    for text in tqdm(stream_texts(dataset_name)):
+    pbar = tqdm(total=n_tokens_approx, unit='tok')
+
+    for text in stream_texts(dataset_name):
         ids = encode(sp, text) + [sp.eos_id()]
-        if len(val_tokens) < val_budget:
-            val_tokens.extend(ids)
-        elif len(train_tokens) < train_budget:
-            train_tokens.extend(ids)
+
+        for tok in ids:
+            if val_cursor < val_budget:
+                chunk.append(tok)
+                if len(chunk) >= chunk_size:
+                    val_cursor = flush_chunk(chunk, val_fp, val_cursor, val_budget)
+                    pbar.update(len(chunk))
+                    chunk = []
+            elif train_cursor < train_budget:
+                chunk.append(tok)
+                if len(chunk) >= chunk_size:
+                    train_cursor = flush_chunk(chunk, train_fp, train_cursor, train_budget)
+                    pbar.update(len(chunk))
+                    chunk = []
+            else:
+                break
         else:
-            break
+            continue
+        break
 
-    print(f"Writing {len(train_tokens):,} train tokens to {train_path}")
-    fp = np.memmap(train_path, dtype=np.uint16, mode='w+', shape=(len(train_tokens),))
-    fp[:] = np.array(train_tokens, dtype=np.uint16)
-    fp.flush()
-    del fp
+    # Flush remaining tokens
+    if chunk:
+        if val_cursor < val_budget:
+            val_cursor = flush_chunk(chunk, val_fp, val_cursor, val_budget)
+        else:
+            train_cursor = flush_chunk(chunk, train_fp, train_cursor, train_budget)
+        pbar.update(len(chunk))
 
-    print(f"Writing {len(val_tokens):,} val tokens to {val_path}")
-    fp = np.memmap(val_path, dtype=np.uint16, mode='w+', shape=(len(val_tokens),))
-    fp[:] = np.array(val_tokens, dtype=np.uint16)
-    fp.flush()
-    del fp
+    pbar.close()
 
-    print(f"Done. Train: {len(train_tokens):,} | Val: {len(val_tokens):,} tokens.")
+    # Truncate to actual written size
+    val_fp.flush()
+    train_fp.flush()
+    del val_fp, train_fp
+
+    if train_cursor < train_budget:
+        # Truncate file to actual written tokens
+        actual = np.memmap(train_path, dtype=np.uint16, mode='r+', shape=(train_budget,))
+        final = np.array(actual[:train_cursor])
+        del actual
+        fp2 = np.memmap(train_path, dtype=np.uint16, mode='w+', shape=(train_cursor,))
+        fp2[:] = final
+        fp2.flush()
+        del fp2
+
+    print(f"Done. Train: {train_cursor:,} | Val: {val_cursor:,} tokens.")
+    print(f"  Train: {train_path}  ({train_cursor*2/1e6:.1f} MB)")
+    print(f"  Val:   {val_path}  ({val_cursor*2/1e6:.1f} MB)")
     return train_path, val_path
 
 
