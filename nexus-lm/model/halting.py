@@ -49,7 +49,7 @@ class HaltingEstimator(nn.Module):
         """
         if quantile is None:
             quantile = self.quantile
-        flat = p.view(-1).detach().cpu()
+        flat = p.view(-1).detach().cpu().float()  # Ensure float dtype
         if flat.numel() == 0:
             return 1
         q = float(torch.quantile(flat, quantile).item())

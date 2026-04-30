@@ -71,6 +71,13 @@ class Trainer:
         self.train_iter = iter(self.train_loader)
 
         model.to(self.device)
+        
+        # Enable multi-GPU training with DataParallel if available
+        if config.device == 'cuda' and torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs")
+            self.model = nn.DataParallel(self.model)
+        else:
+            self.model = model
 
         # Partition parameters: 2D matrices get Muon, rest get AdamW
         muon_params = [p for p in model.parameters()
