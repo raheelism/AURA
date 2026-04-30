@@ -33,6 +33,12 @@ def _apply_rope(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     # First, safely convert to complex view. Last dim becomes 2, dropping half the features.
     x_ = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
     
+    # DataParallel sometimes flattens complex buffers into float tensors (adding a dim=2 at the end)
+    if not freqs.is_complex():
+        if freqs.size(-1) != 2:
+            freqs = freqs.reshape(*freqs.shape[:-1], -1, 2)
+        freqs = torch.view_as_complex(freqs.contiguous())
+    
     # We dynamically slice freqs based on x_'s sequence length (dim 1)
     T_chunk = x_.size(1)
     d_head_half = x_.size(3)  # Use actual size 3 instead of letting it infer the whole rank length
