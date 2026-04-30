@@ -29,15 +29,21 @@ def _make_rope_freqs(
 
 def _apply_rope(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     # x: (B, T, n_heads, d_head) or (B, T, n_kv_heads, d_head)
-    # freqs: (T_max, d_head//2) complex, where T_max might be the max seq_len, and T is the actual chunk length
+    # freqs: (seq_len, d_head//2) complex
+    # First, safely convert to complex view. Last dim becomes 2, dropping half the features.
     x_ = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
     
-    # Slice freqs to exactly match the T dimension of x_
+    # We dynamically slice freqs based on x_'s sequence length (dim 1)
     T_chunk = x_.size(1)
-    freqs_chunk = freqs[:T_chunk]
+    d_head_half = x_.size(3)  # Use actual size 3 instead of letting it infer the whole rank length
     
-    # Broadcast to match x_: (1, T_chunk, 1, d_head//2)
-    x_rot = x_ * freqs_chunk.view(1, T_chunk, 1, -1)
+    # Slice first if freqs is too long (DataParallel can send full sequence freqs but chunked x)
+    freqs_chunk = freqs[:T_chunk, :d_head_half]
+    
+    # Reshape freqs to match x_: (B=1, T, n_heads=1, d_head_half)
+    freqs_reshaped = freqs_chunk.view(1, T_chunk, 1, d_head_half)
+    
+    x_rot = x_ * freqs_reshaped
     return torch.view_as_real(x_rot).flatten(-2).to(x.dtype)
 
 
