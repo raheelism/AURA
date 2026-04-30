@@ -125,10 +125,19 @@ def cmd_ablations(args: argparse.Namespace) -> None:
     if not results:
         print("No ablation results to save.")
         return
+        
+    # Get all unique fieldnames across all result dictionaries
+    all_fieldnames = set()
+    for res in results:
+        all_fieldnames.update(res.keys())
+    # Ensure some standard columns come first if present
+    ordered_fields = ['name', 'model_type', 'max_tokens', 'final_bpb', 'eval_time_hrs']
+    fieldnames = [f for f in ordered_fields if f in all_fieldnames] + \
+                 [f for f in sorted(all_fieldnames) if f not in ordered_fields]
 
     output_csv = output_dir / "ablation_results.csv"
     with open(output_csv, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=results[0].keys())
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
     print(f"Saved: {output_csv}")
