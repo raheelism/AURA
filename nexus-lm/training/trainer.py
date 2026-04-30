@@ -165,6 +165,10 @@ class Trainer:
             x, y = next(self.train_iter)
         return x.to(self.device), y.to(self.device)
 
+    def _reduce_loss(self, loss: torch.Tensor) -> torch.Tensor:
+        """Make DataParallel scalar gathers safe by collapsing to one scalar."""
+        return loss.mean() if loss.dim() > 0 else loss
+
     def train_one_step(self) -> float:
         """Run one gradient accumulation cycle. Returns mean train loss."""
         self.model.train()
@@ -181,6 +185,8 @@ class Trainer:
             with torch.autocast(device_type=autocast_device, dtype=self.dtype,
                                 enabled=(self.dtype == torch.float16)):
                 _, loss = self.model(x, y)
+
+            loss = self._reduce_loss(loss)
 
             self.scaler.scale(loss / self.config.gradient_accumulation).backward()
             total_loss += loss.item()
@@ -222,6 +228,7 @@ class Trainer:
             with torch.autocast(device_type=autocast_device, dtype=self.dtype,
                                 enabled=(self.dtype == torch.float16)):
                 _, loss = self.model(x, y)
+            loss = self._reduce_loss(loss)
             total_loss += loss.item()
             n_batches += 1
             if n_batches >= 50:
