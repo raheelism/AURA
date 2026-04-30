@@ -19,9 +19,12 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-def stream_texts(dataset_name: str):
+def stream_texts(dataset_name: str, verbose: bool = False):
     """Stream text samples from HuggingFace datasets."""
     from datasets import load_dataset
+    if verbose:
+        print(f"[stream_texts] Loading dataset: {dataset_name}")
+    
     if dataset_name == 'fineweb_edu':
         ds = load_dataset(
             "HuggingFaceFW/fineweb-edu",
@@ -36,8 +39,17 @@ def stream_texts(dataset_name: str):
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}. Choose 'fineweb_edu' or 'tinystories'.")
 
+    if verbose:
+        print(f"[stream_texts] Dataset loaded, starting iteration...")
+    
+    count = 0
     for sample in ds:
+        if verbose and count == 0:
+            print(f"[stream_texts] Got first sample!")
         yield sample[field]
+        count += 1
+        if verbose and count % 100 == 0:
+            print(f"[stream_texts] Yielded {count} samples so far...")
 
 
 def train_tokenizer_on_dataset(
@@ -70,6 +82,7 @@ def prepare_dataset_from_texts(
     n_tokens_approx: int,
     val_fraction: float = 0.01,
     chunk_size: int = 100_000,
+    verbose: bool = False,
 ):
     """Prepare a dataset from any iterable of texts.
 
@@ -79,18 +92,23 @@ def prepare_dataset_from_texts(
     """
     from data.tokenizer import load_tokenizer, encode
 
+    if verbose:
+        print(f"[prepare_dataset_from_texts] Loading tokenizer from {tokenizer_path}")
     sp = load_tokenizer(tokenizer_path)
     Path(train_path).parent.mkdir(parents=True, exist_ok=True)
 
     val_budget = int(n_tokens_approx * val_fraction)
     train_budget = n_tokens_approx - val_budget
 
+    if verbose:
+        print(f"[prepare_dataset_from_texts] Allocating memmap: train_budget={train_budget:,}, val_budget={val_budget:,}")
     train_fp = np.memmap(train_path, dtype=np.uint16, mode='w+', shape=(train_budget,))
     val_fp = np.memmap(val_path, dtype=np.uint16, mode='w+', shape=(val_budget,))
 
     train_cursor = 0
     val_cursor = 0
     chunk: list = []
+    text_count = 0
 
     def flush_chunk(buf: list, fp: np.memmap, cursor: int, budget: int):
         if not buf:
@@ -101,7 +119,16 @@ def prepare_dataset_from_texts(
         fp[cursor:cursor + write_n] = arr[:write_n]
         return cursor + write_n
 
+    if verbose:
+        print(f"[prepare_dataset_from_texts] Starting iteration over texts...")
+    
     for text in texts:
+        text_count += 1
+        if verbose and text_count == 1:
+            print(f"[prepare_dataset_from_texts] Got first text! (len={len(text)})")
+        if verbose and text_count % 100 == 0:
+            print(f"[prepare_dataset_from_texts] Processed {text_count} texts, tokens so far: train={train_cursor}, val={val_cursor}")
+        
         ids = encode(sp, text) + [sp.eos_id()]
         for tok in ids:
             if val_cursor < val_budget:
@@ -120,6 +147,9 @@ def prepare_dataset_from_texts(
             continue
         break
 
+    if verbose:
+        print(f"[prepare_dataset_from_texts] Tokenization loop complete. Flushing final chunk...")
+    
     if chunk:
         if val_cursor < val_budget:
             val_cursor = flush_chunk(chunk, val_fp, val_cursor, val_budget)
@@ -130,6 +160,9 @@ def prepare_dataset_from_texts(
     train_fp.flush()
     del val_fp, train_fp
 
+    if verbose:
+        print(f"[prepare_dataset_from_texts] Done. Total texts processed: {text_count}")
+    
     return train_path, val_path, train_cursor, val_cursor
 
 
@@ -140,6 +173,7 @@ def prepare_dataset(
     n_tokens_approx: int,
     val_fraction: float = 0.01,
     chunk_size: int = 100_000,
+    verbose: bool = True,
 ):
     """
     Tokenize and write dataset to binary memmap files.
@@ -154,13 +188,14 @@ def prepare_dataset(
     print(f"Tokenizing {dataset_name} (target: {n_tokens_approx:,} tokens)...")
     pbar = tqdm(total=n_tokens_approx, unit='tok')
     train_path, val_path, train_cursor, val_cursor = prepare_dataset_from_texts(
-        stream_texts(dataset_name),
+        stream_texts(dataset_name, verbose=verbose),
         train_path=train_path,
         val_path=val_path,
         tokenizer_path=tokenizer_path,
         n_tokens_approx=n_tokens_approx,
         val_fraction=val_fraction,
         chunk_size=chunk_size,
+        verbose=verbose,
     )
     pbar.update(train_cursor + val_cursor)
     pbar.close()
