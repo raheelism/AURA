@@ -46,6 +46,21 @@ class BridgeLayer(nn.Module):
 
         self.scale_s = self.d_head_s ** -0.5
         self.scale_r = (d_r // n_heads) ** -0.5
+        # Optional low-rank writeback: reduce v dimensionality via two small projections
+        self.low_rank = None
+        self.U_r = None
+        self.W_s = None
+
+    def enable_low_rank_writeback(self, rank: int):
+        """Enable low-rank writeback with given rank r.
+
+        Adds parameters U_r: (d_r, r) and W_s: (r, d_s) so that
+        v_low = (r @ U_r) @ W_s -> (B, N, d_s)
+        """
+        assert rank > 0 and isinstance(rank, int)
+        self.low_rank = rank
+        self.U_r = nn.Parameter(torch.randn(self.d_r, rank) * 0.02)
+        self.W_s = nn.Parameter(torch.randn(rank, self.d_s) * 0.02)
 
     def _s_reads_r(self, s: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
         """Dense: each S position reads all R slots."""
@@ -79,6 +94,12 @@ class BridgeLayer(nn.Module):
         q = self.sq(s)
         k = self.sk(r)
         v = self.sv(r)
+        # If low-rank writeback enabled, compute v_low = (r @ U_r) @ W_s
+        if self.low_rank is not None and self.U_r is not None and self.W_s is not None:
+            # r: (B, N, d_r), U_r: (d_r, r) -> r_proj: (B, N, r)
+            r_proj = torch.matmul(r, self.U_r)  # (B, N, r)
+            v_low = torch.matmul(r_proj, self.W_s)  # (B, N, d_s)
+            v = v_low
         scores = torch.bmm(q, k.transpose(-2, -1)) * self.scale_s  # (B, T, N)
         topk_vals, topk_idx = torch.topk(scores, k=min(self.top_k, N), dim=-1)
         sparse_scores = torch.full_like(scores, float('-inf'))
@@ -91,6 +112,7 @@ class BridgeLayer(nn.Module):
         s: torch.Tensor,
         r: torch.Tensor,
         gate_v: torch.Tensor,
+        halting_probs: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -110,8 +132,13 @@ class BridgeLayer(nn.Module):
         # 2. R grounds itself in surface evidence
         r = r + self._r_reads_s(r_norm, s_norm)
 
-        # 3. Sparse R → S write-back, gated by verification surprise
+        # 3. Sparse R → S write-back, gated by verification surprise and halting probs
         r_sparse = self._sparse_r_to_s(s_norm, r_norm)
-        s = s + gate_v * r_sparse
+        if halting_probs is not None:
+            # halting_probs: (B, T, 1) in [0,1]; tokens with high p should receive less writeback
+            effective_gate = gate_v * (1.0 - halting_probs)
+        else:
+            effective_gate = gate_v
+        s = s + effective_gate * r_sparse
 
         return s, r

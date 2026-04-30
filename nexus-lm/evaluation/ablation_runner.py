@@ -136,6 +136,15 @@ def run_ablation(
     return result
 
 
+def plan_ablation_runs(requested_ablations):
+    """Resolve requested ablation names into the config dictionaries used by the runner."""
+    planned = []
+    for name in requested_ablations:
+        if name in ABLATION_CONFIGS:
+            planned.append((name, ABLATION_CONFIGS[name]))
+    return planned
+
+
 def main():
     parser = argparse.ArgumentParser(description='Run NEXUS-AURORA ablations')
     parser.add_argument('--config', required=True, help='Path to YAML config')
@@ -145,6 +154,7 @@ def main():
                         help='Ablation names to run')
     parser.add_argument('--output', default='results/ablation_results.csv')
     parser.add_argument('--max_tokens', type=int, default=200_000_000)
+    parser.add_argument('--dry_run', action='store_true', help='Print planned runs and exit without training')
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -153,13 +163,16 @@ def main():
     output_dir = os.path.dirname(os.path.abspath(args.output))
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
+    planned = plan_ablation_runs(args.ablations)
+    if args.dry_run:
+        print("Planned ablations:")
+        for name, cfg in planned:
+            print(f"- {name}: {cfg}")
+        return
+
     results = []
-    for name in args.ablations:
-        if name not in ABLATION_CONFIGS:
-            print(f"Unknown ablation '{name}'. Available: {list(ABLATION_CONFIGS.keys())}")
-            continue
-        result = run_ablation(name, base_config, ABLATION_CONFIGS[name],
-                              args.data, args.val, output_dir, args.max_tokens)
+    for name, cfg in planned:
+        result = run_ablation(name, base_config, cfg, args.data, args.val, output_dir, args.max_tokens)
         results.append(result)
 
     if results:

@@ -56,3 +56,14 @@ class ReasoningStream(nn.Module):
             r = r + self._self_attn(self.norm1(r))
             r = r + self.ffn(self.norm2(r))
         return r
+
+    def forward_masked(self, r: torch.Tensor, n_iter: int = 1, slot_mask: torch.Tensor = None) -> torch.Tensor:
+        """Reasoning update with optional slot_mask (B, N, 1). Inactive slots are preserved."""
+        if slot_mask is None:
+            return self.forward(r, n_iter=n_iter)
+
+        for _ in range(n_iter):
+            updated = r + self._self_attn(self.norm1(r))
+            updated = updated + self.ffn(self.norm2(updated))
+            r = slot_mask * updated + (1.0 - slot_mask) * r
+        return r

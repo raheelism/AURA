@@ -7,6 +7,8 @@ from model.bridge import BridgeLayer
 from model.verify import VerifyLayer
 from model.difficulty import DifficultyEstimator
 from model.cope import CoPE
+from model.halting import HaltingEstimator
+from model.slot_allocation import SlotAllocator
 
 
 class AuroraBlock(nn.Module):
@@ -43,11 +45,26 @@ class AuroraBlock(nn.Module):
             n_kv_heads=config['n_kv_heads_surface'],
         )
         self.difficulty = DifficultyEstimator(d_s=d_s, hidden=128)
+        self.halting = HaltingEstimator(
+            d_s=d_s,
+            d_r=d_r,
+            hidden=128,
+            tau=config.get('halting_tau', 1.0),
+            k_max=config.get('halting_k_max', 4),
+            quantile=config.get('halting_quantile', 0.9),
+        )
         self.reasoning = ReasoningStream(
             d_r=d_r,
             n_slots=config['n_reasoning_slots'],
             n_heads=config['n_heads_reasoning'],
             d_ffn=config['d_ffn_reasoning'],
+        )
+        self.slot_allocator = SlotAllocator(
+            d_s=d_s,
+            d_r=d_r,
+            hidden=config.get('slot_allocator_hidden', 128),
+            min_slots=config.get('slot_allocator_min_slots', max(1, config['n_reasoning_slots'] // 4)),
+            max_slots=config.get('slot_allocator_max_slots', config['n_reasoning_slots']),
         )
         self.bridge = BridgeLayer(
             d_s=d_s,
@@ -82,15 +99,28 @@ class AuroraBlock(nn.Module):
         # Step 2: Long-range semantic processing (full causal GQA + CoPE)
         s = self.semantic(s, cope)
 
-        # Step 3: Decide how many reasoning iterations are needed
-        k_batch, k_logits = self.difficulty(s)
+        # Step 3: Decide how many reasoning iterations are needed (difficulty prior)
+        k_batch_diff, k_logits = self.difficulty(s)
 
-        # Step 4: Run reasoning stream K times (non-causal private workspace)
-        r = self.reasoning(r, n_iter=k_batch)
+        # Two-stage halting: run one cheap reasoning iteration, evaluate per-token halting,
+        # then run additional iterations up to k_batch determined from difficulty vs halting.
+        slot_mask = self.slot_allocator(s, r)
+        r = self.reasoning.forward_masked(r, n_iter=1, slot_mask=slot_mask)
+
+        # compute per-token halting probabilities using pooled R
+        r_pooled = r.mean(dim=1)  # (B, d_r)
+        halting_p = self.halting(s, r_pooled)  # (B, T, 1)
+        halting_k = self.halting.compute_k_batch(halting_p)
+
+        # choose GPU-friendly batch iteration count
+        k_batch = max(int(k_batch_diff), int(halting_k))
+        if k_batch > 1:
+            r = self.reasoning.forward_masked(r, n_iter=k_batch - 1, slot_mask=slot_mask)
 
         # Step 5: Bidirectional S↔R communication
         # gate_v gates the sparse R→S write-back (from previous block's Verify)
-        s, r = self.bridge(s, r, gate_v)
+        # Pass halting probabilities to bridge so R->S writeback can be gated per-token
+        s, r = self.bridge(s, r, gate_v, halting_probs=halting_p)
 
         # Step 6: Compute surprise signal and produce gate for next block
         surprise, gate_v_new = self.verify(s, r)

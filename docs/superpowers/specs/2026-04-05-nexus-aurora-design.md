@@ -200,6 +200,32 @@ R's 32 slots attend to each other without causal masking (full self-attention am
 
 **R initialization:** The 32 reasoning slots are initialized as learned parameters (not from token embeddings). They start as random vectors and learn to represent abstract reasoning primitives over training.
 
+**Dynamic slot allocation:** Not every input needs all 32 slots to move on every block. Let the surface context be pooled as
+
+```text
+c = mean_t s_t
+```
+
+and define a slot score
+
+```text
+u_j = w_2^T σ(W_1 (r_j + W_c c))
+```
+
+for slot `j`. The active set is the top-`k` slots under `u_j`:
+
+```text
+M_j = 1[u_j in TopK(u, k)]
+```
+
+and the masked reasoning update becomes
+
+```text
+r' = M ⊙ f(r) + (1 - M) ⊙ r
+```
+
+This preserves inactive slots exactly while letting the model concentrate compute on a smaller subset of concept slots when the input is easy. It is deliberately sparse and reversible: no slot is destroyed, only temporarily deactivated for the current block.
+
 **R update within a block:**
 ```
 For each block b:

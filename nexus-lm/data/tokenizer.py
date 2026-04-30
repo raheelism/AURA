@@ -1,9 +1,12 @@
 import sentencepiece as spm
-from typing import List
+from typing import Iterable, List
 
 
-def train_tokenizer(texts: List[str], vocab_size: int, output_path: str) -> None:
-    """Train a BPE SentencePiece tokenizer on the given texts."""
+def train_tokenizer(texts: Iterable[str], vocab_size: int, output_path: str) -> None:
+    """Train a BPE SentencePiece tokenizer on the given texts.
+
+    `texts` may be any finite iterable; it is streamed into SentencePiece.
+    """
     spm.SentencePieceTrainer.train(
         sentence_iterator=iter(texts),
         model_prefix=output_path.replace(".model", ""),

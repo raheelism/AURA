@@ -15,6 +15,7 @@ def perplexity_to_bpb(perplexity: float, mean_bytes_per_token: float = 3.5) -> f
     For BPE vocab=8192 on English text, mean ~3.5 bytes/token is typical.
     Lower BPB = better model.
     """
+    perplexity = max(float(perplexity), 1e-12)
     return math.log2(perplexity) / mean_bytes_per_token
 
 
@@ -59,5 +60,5 @@ def compute_bpb(
             total_tokens += n_tokens
 
     mean_loss = total_loss / max(total_tokens, 1)
-    perplexity = math.exp(mean_loss)
+    perplexity = math.exp(min(mean_loss, 80.0))
     return perplexity_to_bpb(perplexity, mean_bytes_per_token)
