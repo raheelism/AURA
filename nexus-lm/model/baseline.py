@@ -31,8 +31,10 @@ def _apply_rope(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     # x: (B, T, n_heads, d_head) or (B, T, n_kv_heads, d_head)
     # freqs: (T, d_head//2) complex
     x_ = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    # x_: (B, T, n_heads, d_head//2); freqs unsqueezed: (1, T, 1, d_head//2)
-    x_rot = x_ * freqs.unsqueeze(0).unsqueeze(2)
+    # freqs unsqueezed: (1, T, 1, d_head//2) -> broadcast matches x_ (B, T, n_heads, d_head//2)
+    # Actually, freqs is (seq_len, d_head//2)
+    # To handle arbitrary chunked T (like in DataParallel), we unsqueeze dims 0 & 2
+    x_rot = x_ * freqs.view((1, x_.size(1), 1, x_.size(3)))
     return torch.view_as_real(x_rot).flatten(-2).to(x.dtype)
 
 
