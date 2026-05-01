@@ -10,34 +10,35 @@ def analyze_routing(
     n_batches: int = 50,
 ) -> Dict[str, float]:
     """
-    Compute routing diagnostics for NexusAurora:
+    Compute routing diagnostics for NexusAurora.
 
-    - k_1 / k_2 / k_4: fraction of positions routed to K=1, K=2, K=4
-    - surprise_mean: mean surprise score (lower = S and R more consistent)
-    - surprise_std: std of surprise scores
-    - total_positions_analyzed: total positions used for statistics
-
-    Returns dict of diagnostic metrics.
+    Handles adaptive models with active DifficultyEstimator modules and ablation
+    variants where routing is disabled or fixed.
     """
-    from model.difficulty import K_VALUES
-
     model.eval()
-    k_counts = {1: 0, 2: 0, 4: 0}
-    k_logits_list = []
+    k_counts = {}
     surprise_list = []
 
     def capture_k_logits(module, input, output):
-        k_batch, logits = output
-        k_logits_list.append(logits.detach().cpu())
+        if isinstance(output, tuple) and len(output) >= 2:
+            logits = output[1]
+        else:
+            return
+        k_values = getattr(module, 'k_values', (1, 2, 4))
+        k_indices = logits.detach().cpu().argmax(dim=-1)
+        for j, k_val in enumerate(k_values):
+            k_counts[k_val] = k_counts.get(k_val, 0) + (k_indices == j).sum().item()
 
     def capture_surprise(module, input, output):
-        surprise, gate_v = output
+        surprise, _ = output
         surprise_list.append(surprise.detach().cpu())
 
     hooks = []
-    for block in model.blocks:
-        hooks.append(block.difficulty.register_forward_hook(capture_k_logits))
-        hooks.append(block.verify.register_forward_hook(capture_surprise))
+    for block in getattr(model, 'blocks', []):
+        if getattr(block, 'difficulty', None) is not None:
+            hooks.append(block.difficulty.register_forward_hook(capture_k_logits))
+        if getattr(block, 'verify', None) is not None:
+            hooks.append(block.verify.register_forward_hook(capture_surprise))
 
     with torch.no_grad():
         for i, (x, y) in enumerate(dataloader):
@@ -49,14 +50,10 @@ def analyze_routing(
     for h in hooks:
         h.remove()
 
-    # Aggregate K distribution
-    for logits in k_logits_list:
-        k_indices = logits.argmax(dim=-1)  # (B, T)
-        for j, k_val in enumerate(K_VALUES):
-            k_counts[k_val] += (k_indices == j).sum().item()
-
     total = max(sum(k_counts.values()), 1)
-    k_dist = {f'k_{k}': v / total for k, v in k_counts.items()}
+    k_dist = {f'k_{k}': v / total for k, v in sorted(k_counts.items())}
+    for k in (1, 2, 4):
+        k_dist.setdefault(f'k_{k}', 0.0)
 
     if surprise_list:
         all_surprise = torch.cat([s.view(-1) for s in surprise_list])

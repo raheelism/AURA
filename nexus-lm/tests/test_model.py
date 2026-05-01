@@ -73,6 +73,34 @@ def test_aurora_embedding_weight_tied():
         "Embedding and lm_head must share weight tensors"
 
 
+def test_aurora_full_model_causal_across_blocks():
+    """Changing future tokens must not change past logits in a multi-block model."""
+    config = small_config()
+    config.n_blocks = 2
+    model = NexusAurora(config).eval()
+    torch.manual_seed(0)
+    x1 = torch.randint(0, config.vocab_size, (1, 16))
+    x2 = x1.clone()
+    x2[0, 10:] = torch.randint(0, config.vocab_size, (6,))
+    with torch.no_grad():
+        logits1 = model(x1)
+        logits2 = model(x2)
+    assert torch.allclose(logits1[:, :10], logits2[:, :10], atol=1e-5), \
+        "Full NexusAurora model leaked future-token information into past logits"
+
+
+def test_aurora_router_and_slot_allocator_receive_gradients():
+    config = small_config()
+    model = NexusAurora(config)
+    x = torch.randint(0, config.vocab_size, (2, 16))
+    y = torch.randint(0, config.vocab_size, (2, 16))
+    _, metrics = model(x, y, return_metrics=True)
+    metrics['loss'].backward()
+    assert model.blocks[0].difficulty.net[0].weight.grad is not None
+    assert model.blocks[0].slot_allocator.context_proj.weight.grad is not None
+    assert model.reasoning_slots.grad is not None
+
+
 def test_aurora_parameter_count():
     """Full-scale model should be approximately 50M parameters."""
     config = AuroraConfig(

@@ -24,6 +24,14 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _strip_dataparallel_prefix(state_dict: dict) -> dict:
+    if not state_dict:
+        return state_dict
+    if not all(k.startswith("module.") for k in state_dict.keys()):
+        return state_dict
+    return {k[len("module."):]: v for k, v in state_dict.items()}
+
+
 def cmd_data_prep(args: argparse.Namespace) -> None:
     _add_repo_root_to_path()
     import numpy as np
@@ -157,7 +165,7 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
 
     model = NexusAurora(AuroraConfig(**cfg["model"]))
     ckpt = torch.load(args.ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(_strip_dataparallel_prefix(ckpt["model_state"]))
     model = model.to(device).eval()
     print(f"Loaded checkpoint: step={ckpt.get('step')} tokens={ckpt.get('tokens_seen')}")
 

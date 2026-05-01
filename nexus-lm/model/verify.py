@@ -39,7 +39,12 @@ class VerifyLayer(nn.Module):
             gate_v:   1 - surprise (B, T, 1), gates R→S write-back strength
         """
         B, T, _ = s.shape
-        r_pooled = r.mean(dim=1).unsqueeze(1).expand(B, T, self.d_r)
+        if r.dim() == 3:
+            r_pooled = r.mean(dim=1).unsqueeze(1).expand(B, T, self.d_r)
+        elif r.dim() == 4:
+            r_pooled = r.mean(dim=2)
+        else:
+            raise ValueError(f"Expected r rank 3 or 4, got shape {tuple(r.shape)}")
         combined = torch.cat([s, r_pooled], dim=-1)
         h = F.gelu(self.proj(combined))
         surprise = torch.sigmoid(self.out(h))

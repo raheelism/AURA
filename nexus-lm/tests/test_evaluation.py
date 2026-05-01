@@ -51,6 +51,31 @@ def test_compute_bpb_smoke_cpu():
     assert bpb > 0
 
 
+def test_compute_bpb_uses_ce_loss_when_metrics_available():
+    class DummyMetricModel(torch.nn.Module):
+        def forward(self, x, y=None, return_metrics=False):
+            logits = torch.zeros(*x.shape, 4)
+            if return_metrics:
+                return logits, {
+                    'loss': torch.tensor(10.0),
+                    'ce_loss': torch.tensor(1.0),
+                }
+            return logits, torch.tensor(10.0)
+
+    x = torch.randint(0, 4, (2, 4))
+    ds = TensorDataset(x, x)
+    loader = DataLoader(ds, batch_size=2)
+    bpb = compute_bpb(
+        DummyMetricModel(),
+        loader,
+        device=torch.device('cpu'),
+        dtype=torch.float32,
+        mean_bytes_per_token=1.0,
+        max_batches=1,
+    )
+    assert abs(bpb - (1.0 / torch.log(torch.tensor(2.0))).item()) < 1e-5
+
+
 def test_analyze_routing_smoke_cpu():
     model = make_tiny_model()
     loader = make_loader()

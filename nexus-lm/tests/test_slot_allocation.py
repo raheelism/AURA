@@ -27,3 +27,15 @@ def test_masked_reasoning_leaves_inactive_slots_unchanged():
     assert out.shape == r.shape
     # inactive slots should remain exactly the same because mask=0
     assert torch.allclose(out[:, 2:], r[:, 2:], atol=1e-6)
+
+
+def test_slot_allocator_straight_through_gradients():
+    B, T, d_s, d_r, N = 2, 8, 32, 16, 4
+    s = torch.randn(B, T, d_s)
+    r = torch.randn(B, T, N, d_r)
+    alloc = SlotAllocator(d_s=d_s, d_r=d_r, hidden=16, min_slots=1, max_slots=2)
+    mask = alloc(s, r)
+    loss = (mask * r).sum()
+    loss.backward()
+    for p in alloc.parameters():
+        assert p.grad is not None

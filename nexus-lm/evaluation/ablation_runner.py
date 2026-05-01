@@ -64,7 +64,9 @@ def build_model(base_config: dict, ablation_config: dict):
         from model.model import NexusAurora, AuroraConfig
         defaults = AuroraConfig()
         overrides = {k: v for k, v in ablation_config.items()
-                     if k not in ('model_type', 'use_reasoning', 'use_verify', 'fixed_k', 'optimizer')}
+                     if k not in ('model_type', 'optimizer')}
+        if 'max_k' in overrides:
+            overrides['max_k'] = overrides.pop('max_k')
         cfg = AuroraConfig(**{
             k: base_config['model'].get(k, getattr(defaults, k))
             for k in defaults.__dataclass_fields__

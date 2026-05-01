@@ -35,7 +35,14 @@ class HaltingEstimator(nn.Module):
         B, T, d_s = s.shape
         if r_pooled.dim() == 2:
             r_pooled = r_pooled.unsqueeze(1)
-        r_exp = r_pooled.expand(-1, T, -1)
+        if r_pooled.size(1) == 1:
+            r_exp = r_pooled.expand(-1, T, -1)
+        elif r_pooled.size(1) == T:
+            r_exp = r_pooled
+        else:
+            raise ValueError(
+                f"r_pooled sequence dim must be 1 or {T}, got {r_pooled.size(1)}"
+            )
         x = torch.cat([s, r_exp], dim=-1)
         logits = self.mlp(x)  # (B, T, 1)
         p = torch.sigmoid(logits / max(self.tau, 1e-8))

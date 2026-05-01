@@ -54,7 +54,11 @@ def compute_bpb(
             x, y = x.to(device), y.to(device)
             with torch.autocast(device_type=autocast_device, dtype=dtype,
                                 enabled=(dtype == torch.float16)):
-                _, loss = model(x, y)
+                try:
+                    _, metrics = model(x, y, return_metrics=True)
+                    loss = metrics.get('ce_loss', metrics.get('loss'))
+                except TypeError:
+                    _, loss = model(x, y)
             n_tokens = y.numel()
             total_loss += loss.item() * n_tokens
             total_tokens += n_tokens

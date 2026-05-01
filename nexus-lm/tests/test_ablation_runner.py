@@ -43,3 +43,51 @@ def test_build_model_smoke_small_configs():
     aurora = build_model(base_config, {'model_type': 'aurora'})
     assert llama is not None
     assert aurora is not None
+
+
+def test_aurora_ablation_switches_change_behavior():
+    base_config = {
+        'model': {
+            'n_blocks': 1,
+            'd_surface': 32,
+            'n_heads_surface': 2,
+            'n_kv_heads_surface': 1,
+            'vocab_size': 64,
+            'max_seq_len': 16,
+            'd_reasoning': 16,
+            'd_verify': 8,
+            'n_reasoning_slots': 4,
+            'n_heads_reasoning': 2,
+            'd_ffn_pattern': 32,
+            'd_ffn_semantic': 64,
+            'd_ffn_reasoning': 32,
+            'local_window': 4,
+            'bridge_top_k': 2,
+            'cope_positions': 4,
+            'surprise_loss_weight': 0.1,
+            'difficulty_entropy_weight': 0.01,
+        },
+        'training': {},
+    }
+    s_only = build_model(base_config, {
+        'model_type': 'aurora',
+        'use_reasoning': False,
+        'use_verify': False,
+    })
+    fixed = build_model(base_config, {
+        'model_type': 'aurora',
+        'use_reasoning': True,
+        'use_verify': True,
+        'fixed_k': 1,
+    })
+    adaptive = build_model(base_config, {
+        'model_type': 'aurora',
+        'use_reasoning': True,
+        'use_verify': True,
+        'fixed_k': None,
+    })
+    assert s_only.config.use_reasoning is False
+    assert s_only.blocks[0].reasoning is None
+    assert fixed.config.fixed_k == 1
+    assert fixed.blocks[0].difficulty is None
+    assert adaptive.blocks[0].difficulty is not None

@@ -28,6 +28,12 @@ class AuroraConfig:
     max_seq_len: int = 512
     surprise_loss_weight: float = 0.1
     difficulty_entropy_weight: float = 0.01
+    use_reasoning: bool = True
+    use_verify: bool = True
+    use_slot_allocator: bool = True
+    use_halting_gate: bool = True
+    fixed_k: Optional[int] = None
+    max_k: int = 4
 
     def to_block_config(self) -> dict:
         return {
@@ -45,6 +51,12 @@ class AuroraConfig:
             'bridge_top_k': self.bridge_top_k,
             'surprise_loss_weight': self.surprise_loss_weight,
             'difficulty_entropy_weight': self.difficulty_entropy_weight,
+            'use_reasoning': self.use_reasoning,
+            'use_verify': self.use_verify,
+            'use_slot_allocator': self.use_slot_allocator,
+            'use_halting_gate': self.use_halting_gate,
+            'fixed_k': self.fixed_k,
+            'max_k': self.max_k,
         }
 
 
@@ -52,13 +64,9 @@ class NexusAurora(nn.Module):
     """
     Full NEXUS-AURORA model.
 
-    Three parallel streams:
-    - Surface (S, d_surface): generates tokens, autoregressive
-    - Reasoning (R, d_reasoning): private workspace, never generates tokens
-    - Verification gate (V): scalar gate controlling R→S write-back strength
-
-    Each of n_blocks AuroraBlocks processes all three streams.
-    Loss = CrossEntropy(S) + surprise_loss_weight * mean(surprise_losses)
+    Surface states produce tokens. The reasoning stream is prefix-local in the
+    full model: r has shape (B, T, n_slots, d_reasoning), so each position's
+    private workspace can only be grounded in its own prefix.
     """
 
     def __init__(self, config: AuroraConfig):
@@ -66,20 +74,22 @@ class NexusAurora(nn.Module):
         self.config = config
 
         self.embedding = nn.Embedding(config.vocab_size, config.d_surface)
+        self.reasoning_slots = nn.Parameter(
+            torch.randn(config.n_reasoning_slots, config.d_reasoning) * 0.02
+        )
         self.cope = CoPE(config.d_surface, n_positions=config.cope_positions)
         self.blocks = nn.ModuleList([
             AuroraBlock(config.to_block_config()) for _ in range(config.n_blocks)
         ])
         self.norm = RMSNorm(config.d_surface)
         self.lm_head = nn.Linear(config.d_surface, config.vocab_size, bias=False)
-
-        # Weight tying: input embedding = output projection
         self.lm_head.weight = self.embedding.weight
 
         self._init_weights()
 
     def _init_weights(self):
         nn.init.normal_(self.embedding.weight, std=0.02)
+        nn.init.normal_(self.reasoning_slots, std=0.02)
         for block in self.blocks:
             for name, p in block.named_parameters():
                 if 'weight' in name and p.dim() >= 2:
@@ -91,38 +101,29 @@ class NexusAurora(nn.Module):
         self,
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
+        return_metrics: bool = False,
     ) -> Tuple[torch.Tensor, ...]:
-        """
-        Args:
-            input_ids: (B, T) token IDs
-            targets:   (B, T) target token IDs for loss (optional)
-        Returns:
-            If targets is None: logits (B, T, vocab_size)
-            If targets given:   (logits, total_loss)
-        """
         B, T = input_ids.shape
         device = input_ids.device
 
-        # Surface stream: token embeddings
-        s = self.embedding(input_ids)  # (B, T, d_surface)
-
-        # Reasoning stream: each block owns its own slots parameter;
-        # we initialize R from the first block's learned slots
-        r = self.blocks[0].reasoning.slots.unsqueeze(0).expand(B, -1, -1).clone()
-        # (B, n_slots, d_reasoning)
-
-        # Verification gate: starts at 1.0 (full write-back initially)
+        s = self.embedding(input_ids)
+        r = self.reasoning_slots.view(1, 1, self.config.n_reasoning_slots, self.config.d_reasoning)
+        r = r.expand(B, T, -1, -1).clone()
         gate_v = torch.ones(B, T, 1, device=device, dtype=s.dtype)
 
-        # Forward through all blocks
         total_surprise_loss = torch.tensor(0.0, device=device, dtype=s.dtype)
+        total_routing_loss = torch.tensor(0.0, device=device, dtype=s.dtype)
+        total_mean_k = torch.tensor(0.0, device=device, dtype=s.dtype)
         for block in self.blocks:
-            s, r, gate_v, surprise_loss = block(s, r, gate_v, self.cope)
+            s, r, gate_v, surprise_loss, aux = block(
+                s, r, gate_v, self.cope, return_aux=True
+            )
             total_surprise_loss = total_surprise_loss + surprise_loss
+            total_routing_loss = total_routing_loss + aux['routing_loss']
+            total_mean_k = total_mean_k + aux['mean_k']
 
-        # Final norm and project to vocabulary
         s = self.norm(s)
-        logits = self.lm_head(s)  # (B, T, vocab_size)
+        logits = self.lm_head(s)
 
         if targets is None:
             return logits
@@ -131,9 +132,24 @@ class NexusAurora(nn.Module):
             logits.view(-1, self.config.vocab_size),
             targets.view(-1),
         )
-        mean_surprise = total_surprise_loss / self.config.n_blocks
-        total_loss = ce_loss + self.config.surprise_loss_weight * mean_surprise
+        mean_surprise = total_surprise_loss / max(self.config.n_blocks, 1)
+        mean_routing = total_routing_loss / max(self.config.n_blocks, 1)
+        mean_k = total_mean_k / max(self.config.n_blocks, 1)
+        aux_loss = (
+            self.config.surprise_loss_weight * mean_surprise
+            + self.config.difficulty_entropy_weight * mean_routing
+        )
+        total_loss = ce_loss + aux_loss
 
+        if return_metrics:
+            return logits, {
+                'loss': total_loss,
+                'ce_loss': ce_loss,
+                'aux_loss': aux_loss,
+                'surprise_loss': mean_surprise,
+                'routing_loss': mean_routing,
+                'mean_k': mean_k.detach(),
+            }
         return logits, total_loss
 
     @torch.no_grad()
@@ -144,7 +160,6 @@ class NexusAurora(nn.Module):
         temperature: float = 1.0,
         top_k: int = 50,
     ) -> torch.Tensor:
-        """Simple autoregressive generation for evaluation."""
         self.eval()
         ids = prompt_ids.clone()
         for _ in range(max_new_tokens):

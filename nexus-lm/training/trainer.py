@@ -250,7 +250,14 @@ class Trainer:
 
     def load_checkpoint(self, path: str):
         checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state'])
+        state = checkpoint['model_state']
+        target_is_dp = isinstance(self.model, nn.DataParallel)
+        state_is_dp = bool(state) and all(k.startswith('module.') for k in state.keys())
+        if state_is_dp and not target_is_dp:
+            state = {k[len('module.'):]: v for k, v in state.items()}
+        elif target_is_dp and not state_is_dp:
+            state = {f'module.{k}': v for k, v in state.items()}
+        self.model.load_state_dict(state)
         if 'optimizer_state' in checkpoint:
             self.optimizer.load_state_dict(checkpoint['optimizer_state'])
         if self.muon and checkpoint.get('muon_state') is not None:
